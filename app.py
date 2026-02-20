@@ -245,4 +245,4 @@ if __name__ == '__main__':
     DEBUG_MODE = os.getenv('DEBUG', 'False').lower() == 'true'
     PORT = int(os.getenv('PORT', 5000))
     logger.info(f"서버 시작: port={PORT}, debug={DEBUG_MODE}")
-    app.run(debug=DEBUG_MODE, port=PORT)
+    app.run(host='0.0.0.0', debug=DEBUG_MODE, port=PORT)
