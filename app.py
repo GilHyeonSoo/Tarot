@@ -40,8 +40,8 @@ if DEEPSEEK_API_KEY:
     )
 
 # 토큰 설정 (조절 가능)
-TOKENS_NORMAL = 1000   # 1~9번 카드 (더 자세한 해석)
-TOKENS_FINAL = 2500    # 10번 카드 (종합 요약 포함)
+TOKENS_NORMAL = 600   # 1~9번 카드 (더 자세한 해석)
+TOKENS_FINAL = 2500   # 10번 카드 (종합 요약 포함)
 
 # 카드 위치별 의미
 POSITION_MEANINGS = [
@@ -96,8 +96,8 @@ def interpret_single_card():
     situation = data.get('situation', '')
     all_cards = data.get('allCards', [])
     
-    # 입력값 검증
-    if not isinstance(card_index, int) or not 0 <= card_index <= 9:
+    # 입력값 검증 (10 = 최종 요약 전용)
+    if not isinstance(card_index, int) or not 0 <= card_index <= 10:
         return jsonify({"success": False, "error": "유효하지 않은 카드 인덱스입니다."}), 400
     
     if len(situation) > 500:
@@ -112,21 +112,21 @@ def interpret_single_card():
     
     is_reversed = card_data.get('isReversed', False)
     direction = "역방향" if is_reversed else "정방향"
-    is_last_card = card_index == 9  # 0-indexed
+    is_summary_request = card_index == 10  # 최종 요약 전용 요청
     
-    position_name, position_desc = POSITION_MEANINGS[card_index]
     category_name = CATEGORY_NAMES.get(category.get('id', ''), '운세')
     
     # DeepSeek API 키가 없으면 기본 해석 반환
     if not client:
-        fallback = f"**{card['name_kr']}** ({direction})\n\n{card['meaning']}\n\n이 카드는 {position_name}을(를) 나타냅니다."
-        if is_last_card:
-            fallback += "\n\n---\n\n## ✨ 종합 요약\n\n10장의 카드가 모두 공개되었습니다. 각 카드의 메시지를 종합하면, 당신에게 밝은 미래가 기다리고 있습니다."
+        if is_summary_request:
+            fallback = "## ✨ 종합 요약\n\n10장의 카드가 모두 공개되었습니다. 각 카드의 메시지를 종합하면, 당신에게 밝은 미래가 기다리고 있습니다."
+        else:
+            fallback = f"**{card['name_kr']}** ({direction})\n\n{card['meaning']}\n\n이 카드는 {POSITION_MEANINGS[card_index][0]}을(를) 나타냅니다."
         return jsonify({"success": True, "interpretation": fallback, "note": "API 키 없음"})
     
     # 프롬프트 생성
-    if is_last_card:
-        # 마지막 카드: 해당 카드 해석 + 종합 요약
+    if is_summary_request:
+        # 최종 요약 전용 (카드 해석 없이 종합 요약만)
         cards_summary = ""
         for i, c in enumerate(all_cards):
             card_info = get_card_by_id(c.get('id'))
@@ -137,48 +137,28 @@ def interpret_single_card():
         prompt = f"""당신은 40년 경력의 타로 점술가 할머니입니다. 사용자가 {category_name}에 대해 질문했습니다.
 상황: {situation if situation else "(입력하지 않음)"}
 
-**마지막 10번째 카드:**
-위치: {position_name}
-카드: {card['name_kr']} ({direction})
-
 지금까지 선택된 10장의 카드:
 {cards_summary}
 
-다음 규칙으로 해석을 작성해주세요:
-1. 제목 없이 바로 해석 시작
+이제 10장의 카드를 모두 살펴봤으니, 종합 운세 요약을 작성해주세요.
+다음 규칙으로 작성해주세요:
+1. 제목 없이 바로 시작
 2. **중요한 키워드**는 강조
 3. 문장 사이에 적절한 줄바꿈으로 가독성 향상
-4. 먼저 이 카드({card['name_kr']})의 해석을 4-6문장으로 자세히 (카드의 상징, 위치와의 관계, 질문자에게 주는 의미)
-5. 빈 줄 후 "---" 구분선
-6. 그 다음 종합 운세 요약을 6-8문장으로 자세히 작성:
+4. 6-8문장으로 종합 요약 작성:
    - 과거 카드들이 보여준 흐름 분석
    - 현재 상황에 대한 구체적 진단
    - 미래에 대한 명확한 방향 제시
    - 실생활에서 실천할 수 있는 구체적인 핵심 조언 1-2가지
    - 따뜻하고 희망적인 마무리
-7. 60대 할머니의 자연스러운 말투로 작성
-8. 카드의 의미가 긍정적일 때는 따뜻하게 감싸주고, 부정적이거나 경고가 필요할 때는 냉정하고 직설적으로 따끔하게
-9. 매번 같은 표현을 반복하지 말고 매 카드마다 다양한 어투와 표현을 사용
-10. 카드의 그림에 담긴 상징이나 의미를 구체적으로 언급하며 설명
-11. 사용자의 상황(질문 분야)에 딱 맞는 실질적인 조언 포함
-
-예시 형식:
-얘야, 마지막으로 나온 이 카드를 보렴. {card['name_kr']}가 **최종 결과** 자리에 떡 하니 나왔구나.
-
-이 카드에 그려진 모습이 보이지? 이건 **변화와 성장**을 뜻하는 거란다. 네가 지금까지 겪어온 고생이 헛되지 않았다는 걸 카드가 말해주고 있어.
-
-할머니가 오래 카드를 봐왔지만, 이 자리에 이 카드가 나오면 **좋은 징조**인 경우가 많았단다. *마음을 열고* 다가오는 기회를 놓치지 마렴.
-
----
-
-자, 이제 열 장의 카드를 다 펼쳐봤으니 처음부터 정리를 해볼게.
-
-첫 번째 카드에서부터 할머니 눈엔 이미 네 안에 있는 **잠재력**이 보였단다...
-
-(과거-현재-미래 흐름을 구체적으로 분석, 핵심 조언, 따뜻한 마무리)"""
+5. 60대 할머니의 자연스러운 말투로 작성
+6. 매번 같은 표현을 반복하지 말고 다양한 어투와 표현 사용
+7. 사용자의 상황(질문 분야)에 딱 맞는 실질적인 조언 포함
+8. 카드의 의미가 긍정적일 때는 따뜻하게, 부정적이거나 경고가 필요할 때는 냉정하고 직설적으로"""
         max_tokens = TOKENS_FINAL
     else:
-        # 일반 카드 (1~9번)
+        # 일반 카드 (1~10번 모두 동일한 형식)
+        position_name, position_desc = POSITION_MEANINGS[card_index]
         prompt = f"""당신은 40년 경력의 타로 점술가 할머니입니다. 사용자가 {category_name}에 대해 질문했습니다.
 상황: {situation if situation else "(입력하지 않음)"}
 
@@ -190,7 +170,7 @@ def interpret_single_card():
 1. 제목 없이 바로 해석 시작
 2. **중요한 키워드**는 강조 표시
 3. 문장 사이에 적절한 줄바꿈으로 가독성 향상
-4. 5-7문장으로 자세하게 해석:
+4. 2문장으로 자세하게 해석:
    - 이 카드가 이 위치({position_name})에서 나온 의미를 구체적으로 설명
    - 카드에 담긴 핵심 상징과 메시지를 풀이
    - 사용자의 질문 분야({category_name})에 맞게 실생활과 연결하여 조언
