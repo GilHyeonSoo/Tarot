@@ -6,6 +6,7 @@ from openai import OpenAI
 import os
 import json
 import logging
+import requests
 from dotenv import load_dotenv
 from tarot_data import get_all_cards, get_card_by_id
 
@@ -411,6 +412,56 @@ def interpret_single_card():
             yield f"data: {json.dumps({'error': '해석 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.'})}\n\n"
     
     return Response(generate(), mimetype='text/event-stream')
+
+
+@app.route('/api/feedback', methods=['POST'])
+@limiter.limit("5 per day; 3 per hour")
+def submit_feedback():
+    """사용자 피드백을 디스코드 웹훅으로 전송"""
+    try:
+        data = request.json
+        feedback_text = data.get('feedback')
+        language = data.get('language', 'ko')
+        
+        if not feedback_text:
+            return jsonify({"success": False, "error": "Feedback text is required"}), 400
+
+        webhook_url = os.getenv('DISCORD_WEBHOOK_URL')
+        if not webhook_url:
+            logger.warning("Discord Webhook URL이 설정되지 않아 콘솔에만 출력합니다.")
+            logger.info(f"[FEEDBACK] {feedback_text}")
+            return jsonify({"success": True, "message": "Feedback logged locally (Webhook not configured)"})
+
+        # 디스코드 메시지 포맷 지정
+        discord_data = {
+            "content": None,
+            "embeds": [
+                {
+                    "title": "💌 새로운 피드백이 도착했습니다! (Lumina Tarot)",
+                    "description": feedback_text,
+                    "color": 15844367, # Gold/Yellowish color
+                    "fields": [
+                        {
+                            "name": "Language",
+                            "value": language,
+                            "inline": True
+                        }
+                    ]
+                }
+            ]
+        }
+        
+        response = requests.post(webhook_url, json=discord_data)
+        response.raise_for_status()
+        
+        return jsonify({"success": True, "message": "Feedback sent successfully"})
+        
+    except requests.exceptions.HTTPError as err:
+        logger.error(f"디스코드 웹훅 전송 실패: {str(err)}")
+        return jsonify({"success": False, "error": "Failed to send to Discord"}), 500
+    except Exception as e:
+        logger.error(f"피드백 전송 중 오류 발생: {str(e)}")
+        return jsonify({"success": False, "error": "Internal server error"}), 500
 
 
 @app.route('/api/health', methods=['GET'])
