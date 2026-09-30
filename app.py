@@ -1,4 +1,4 @@
-from flask import Flask, jsonify, request, Response
+from flask import Flask, jsonify, request, Response, stream_with_context
 from flask_cors import CORS
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
@@ -515,9 +515,11 @@ def interpret_single_card():
         )
         max_tokens = TOKENS_NORMAL
     
-    # 스트리밍 응답
+    # 스트리밍 응답. 첫 ping으로 프록시/Gunicorn idle timeout을 막고,
+    # 요약도 카드 해석과 같이 토큰이 나오는 즉시 보낸다.
     def generate():
         try:
+            yield ": keepalive\n\n"
             stream = client.chat.completions.create(
                 model="deepseek-chat",
                 messages=[
@@ -529,29 +531,26 @@ def interpret_single_card():
                 stream=True
             )
 
-            if is_summary_request:
-                full_text = ""
-                for chunk in stream:
-                    if chunk.choices[0].delta.content:
-                        full_text += chunk.choices[0].delta.content
-                full_text = trim_to_complete_sentences(full_text)
-                if full_text:
-                    yield f"data: {json.dumps({'content': full_text})}\n\n"
-                yield f"data: {json.dumps({'done': True})}\n\n"
-                return
-            
             for chunk in stream:
                 if chunk.choices[0].delta.content:
                     content = chunk.choices[0].delta.content
                     yield f"data: {json.dumps({'content': content})}\n\n"
-            
+
             yield f"data: {json.dumps({'done': True})}\n\n"
-            
+
         except Exception as e:
             logger.error(f"AI 해석 오류: {str(e)}")
             yield f"data: {json.dumps({'error': '해석 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.'})}\n\n"
-    
-    return Response(generate(), mimetype='text/event-stream')
+
+    return Response(
+        stream_with_context(generate()),
+        mimetype='text/event-stream',
+        headers={
+            'Cache-Control': 'no-cache, no-transform',
+            'X-Accel-Buffering': 'no',
+            'Connection': 'keep-alive',
+        },
+    )
 
 
 @app.route('/api/health', methods=['GET'])
