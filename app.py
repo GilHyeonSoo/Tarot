@@ -7,6 +7,8 @@ import os
 import json
 import logging
 import re
+import requests
+from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 from tarot_data import get_all_cards, get_card_by_id
 
@@ -39,6 +41,9 @@ if DEEPSEEK_API_KEY:
         api_key=DEEPSEEK_API_KEY,
         base_url="https://api.deepseek.com"
     )
+
+DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
+KST = timezone(timedelta(hours=9))
 
 # 토큰 설정 (조절 가능)
 TOKENS_NORMAL = 600   # 개별 카드 해석
@@ -551,6 +556,148 @@ def interpret_single_card():
             'Connection': 'keep-alive',
         },
     )
+
+
+def _parse_iso_datetime(value):
+    if not value:
+        return None
+    try:
+        normalized = value.replace('Z', '+00:00')
+        return datetime.fromisoformat(normalized)
+    except (TypeError, ValueError):
+        return None
+
+
+def _format_kst(dt):
+    if not dt:
+        return '-'
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(KST).strftime('%Y-%m-%d %H:%M')
+
+
+def _format_duration(started_at, ended_at):
+    start = _parse_iso_datetime(started_at)
+    end = _parse_iso_datetime(ended_at)
+    if not start or not end:
+        return '알 수 없음'
+    seconds = max(0, int((end - start).total_seconds()))
+    if seconds < 60:
+        return '1분 미만'
+    minutes = seconds // 60
+    return f'{minutes}분'
+
+
+def _summarize_user_agent(user_agent):
+    if not user_agent:
+        return '-'
+    compact = re.sub(r'\s+', ' ', user_agent.strip())
+    if len(compact) <= 220:
+        return compact
+    return f'{compact[:217]}...'
+
+
+def _build_discord_session_message(data):
+    device = data.get('device') or {}
+    situation = (data.get('situation') or '').strip() or '(없음)'
+    completed = '예' if data.get('completed') else '아니오'
+    touch = '예' if device.get('touch') else '아니오'
+    started = _format_kst(_parse_iso_datetime(data.get('startedAt')))
+    ended = _format_kst(_parse_iso_datetime(data.get('endedAt')))
+    duration = _format_duration(data.get('startedAt'), data.get('endedAt'))
+
+    lines = [
+        '루미나 타로 이용 로그',
+        '━━━━━━━━━━━━━━━━━━',
+        f'질문: {situation}',
+        f'세션: {data.get("sessionId", "-")}',
+        f'완료: {completed}',
+        f'기기: {device.get("summary", "-")}',
+        f'- 플랫폼: {device.get("platform", "-")}',
+        f'- 브라우저: {device.get("browser", "-")}',
+        f'- 화면: {device.get("screen", "-")}',
+        f'- 터치: {touch}',
+        f'- User-Agent: {_summarize_user_agent(device.get("userAgent"))}',
+        f'이용: {started} ~ {ended} ({duration})',
+        f'스프레드: {data.get("spreadLabel") or data.get("spread") or "-"}',
+        f'언어: {data.get("language") or "ko"}',
+    ]
+    return '\n'.join(lines)
+
+
+def _send_discord_session_log(data):
+    if not DISCORD_WEBHOOK_URL:
+        logger.warning('DISCORD_WEBHOOK_URL이 설정되지 않아 세션 로그를 건너뜁니다.')
+        return False
+
+    message = _build_discord_session_message(data)
+    response = requests.post(
+        DISCORD_WEBHOOK_URL,
+        json={'content': message},
+        timeout=8,
+    )
+    response.raise_for_status()
+    return True
+
+
+@app.route('/api/log-session', methods=['POST'])
+@limiter.limit("30 per minute")
+def log_session():
+    """이용 세션을 Discord 웹훅으로 전송"""
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"success": False, "error": "요청 데이터가 없습니다."}), 400
+    except Exception:
+        return jsonify({"success": False, "error": "잘못된 JSON 형식입니다."}), 400
+
+    session_id = data.get('sessionId', '')
+    if not isinstance(session_id, str) or not re.fullmatch(
+        r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}',
+        session_id,
+        re.IGNORECASE,
+    ):
+        return jsonify({"success": False, "error": "유효하지 않은 세션 ID입니다."}), 400
+
+    situation = data.get('situation', '')
+    if not isinstance(situation, str) or len(situation) > 500:
+        return jsonify({"success": False, "error": "질문 내용이 유효하지 않습니다."}), 400
+
+    spread_label = data.get('spreadLabel', '')
+    if not isinstance(spread_label, str) or len(spread_label) > 120:
+        spread_label = str(data.get('spread', ''))[:120]
+
+    language = data.get('language', 'ko')
+    if not isinstance(language, str) or len(language) > 10:
+        language = 'ko'
+
+    device = data.get('device') if isinstance(data.get('device'), dict) else {}
+
+    payload = {
+        'sessionId': session_id,
+        'situation': situation,
+        'completed': bool(data.get('completed')),
+        'startedAt': data.get('startedAt'),
+        'endedAt': data.get('endedAt'),
+        'spread': data.get('spread', ''),
+        'spreadLabel': spread_label,
+        'language': language,
+        'device': {
+            'summary': str(device.get('summary', '-'))[:120],
+            'platform': str(device.get('platform', '-'))[:40],
+            'browser': str(device.get('browser', '-'))[:60],
+            'screen': str(device.get('screen', '-'))[:20],
+            'touch': bool(device.get('touch')),
+            'userAgent': str(device.get('userAgent', ''))[:500],
+        },
+    }
+
+    try:
+        _send_discord_session_log(payload)
+    except Exception as exc:
+        logger.error(f'Discord 세션 로그 전송 실패: {exc}')
+
+    return jsonify({"success": True})
 
 
 @app.route('/api/health', methods=['GET'])
