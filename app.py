@@ -6,6 +6,7 @@ from openai import OpenAI
 from httpx import Timeout
 import os
 import logging
+import json
 import re
 import requests
 from datetime import datetime, timezone, timedelta
@@ -27,7 +28,7 @@ ALLOWED_ORIGINS = [origin.strip().rstrip('/') for origin in os.getenv(
     "ALLOWED_ORIGINS", "http://localhost:5173,http://localhost:3000,http://127.0.0.1:3000"
 ).split(",") if origin.strip()]
 CORS(app, origins=ALLOWED_ORIGINS, max_age=600)
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024
+app.config['MAX_CONTENT_LENGTH'] = 64 * 1024
 
 # Rate Limiter 설정
 limiter = Limiter(
@@ -322,15 +323,6 @@ def _format_duration(started_at, ended_at):
     return f'{minutes}분'
 
 
-def _summarize_user_agent(user_agent):
-    if not user_agent:
-        return '-'
-    compact = re.sub(r'\s+', ' ', user_agent.strip())
-    if len(compact) <= 220:
-        return compact
-    return f'{compact[:217]}...'
-
-
 def _build_discord_session_message(data):
     device = data.get('device') or {}
     situation = (data.get('situation') or '').strip() or '(없음)'
@@ -344,18 +336,19 @@ def _build_discord_session_message(data):
         '루미나 타로 이용 로그',
         '━━━━━━━━━━━━━━━━━━',
         f'질문: {situation}',
-        f'세션: {data.get("sessionId", "-")}',
         f'완료: {completed}',
         f'기기: {device.get("summary", "-")}',
         f'- 플랫폼: {device.get("platform", "-")}',
         f'- 브라우저: {device.get("browser", "-")}',
         f'- 화면: {device.get("screen", "-")}',
         f'- 터치: {touch}',
-        f'- User-Agent: {_summarize_user_agent(device.get("userAgent"))}',
         f'이용: {started} ~ {ended} ({duration})',
         f'스프레드: {data.get("spreadLabel") or data.get("spread") or "-"}',
         f'언어: {data.get("language") or "ko"}',
     ]
+    interpretation = (data.get('interpretation') or '').strip()
+    if data.get('completed') and interpretation:
+        lines.extend(['', 'AI 해설', '━━━━━━━━━━━━━━━━━━', interpretation])
     return '\n'.join(lines)
 
 
@@ -365,9 +358,27 @@ def _send_discord_session_log(data):
         return False
 
     message = _build_discord_session_message(data)
+    # Discord limits content to 2,000 characters. Attach long logs in full
+    # instead of truncating the question or the completed reading.
+    payload = {'content': message, 'allowed_mentions': {'parse': []}}
+    options = {'json': payload}
+    if len(message.encode('utf-16-le')) // 2 > 2000:
+        payload['content'] = (
+            '루미나 타로 이용 로그\n'
+            '전체 이용 로그와 AI 해설은 첨부된 텍스트 파일에서 확인해주세요.'
+        )
+        options = {
+            'data': {'payload_json': json.dumps(payload, ensure_ascii=False)},
+            'files': {'files[0]': (
+                'tarot-reading.txt',
+                message.encode('utf-8'),
+                'text/plain; charset=utf-8',
+            )},
+        }
     response = requests.post(
         DISCORD_WEBHOOK_URL,
-        json={'content': message},
+        params={'wait': 'true'},
+        **options,
         timeout=8,
     )
     response.raise_for_status()
@@ -380,7 +391,7 @@ def log_session():
     """이용 세션을 Discord 웹훅으로 전송"""
     try:
         data = request.get_json()
-        if not data:
+        if not isinstance(data, dict) or not data:
             return jsonify({"success": False, "error": "요청 데이터가 없습니다."}), 400
     except Exception:
         return jsonify({"success": False, "error": "잘못된 JSON 형식입니다."}), 400
@@ -397,6 +408,10 @@ def log_session():
     if not isinstance(situation, str) or len(situation) > 500:
         return jsonify({"success": False, "error": "질문 내용이 유효하지 않습니다."}), 400
 
+    interpretation = data.get('interpretation', '')
+    if not isinstance(interpretation, str) or len(interpretation) > 10000:
+        return jsonify({"success": False, "error": "AI 해설 내용이 유효하지 않습니다."}), 400
+
     spread_label = data.get('spreadLabel', '')
     if not isinstance(spread_label, str) or len(spread_label) > 120:
         spread_label = str(data.get('spread', ''))[:120]
@@ -411,6 +426,7 @@ def log_session():
         'sessionId': session_id,
         'situation': situation,
         'completed': bool(data.get('completed')),
+        'interpretation': interpretation if data.get('completed') else '',
         'startedAt': data.get('startedAt'),
         'endedAt': data.get('endedAt'),
         'spread': data.get('spread', ''),
@@ -429,7 +445,7 @@ def log_session():
     try:
         _send_discord_session_log(payload)
     except Exception as exc:
-        logger.error(f'Discord 세션 로그 전송 실패: {exc}')
+        logger.error('Discord 세션 로그 전송 실패: %s', type(exc).__name__)
 
     return jsonify({"success": True})
 
