@@ -443,11 +443,15 @@ def log_session():
     }
 
     try:
-        _send_discord_session_log(payload)
+        if not _send_discord_session_log(payload):
+            return jsonify({"success": False, "code": "configuration", "retryable": False}), 503
     except Exception as exc:
         logger.error('Discord 세션 로그 전송 실패: %s', type(exc).__name__)
+        status = getattr(getattr(exc, 'response', None), 'status_code', None)
+        retryable = status is None or status == 429 or status >= 500
+        return jsonify({"success": False, "code": "delivery", "retryable": retryable}), 502
 
-    return jsonify({"success": True})
+    return jsonify({"success": True, "delivered": True})
 
 
 @app.route('/api/health', methods=['GET'])

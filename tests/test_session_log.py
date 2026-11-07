@@ -33,6 +33,7 @@ class DiscordSessionLogTests(unittest.TestCase):
         payload = self.payload(interpretation='**태양**의 즐거움을 나누어보세요. @everyone <@123>')
         response = self.http.post('/api/log-session', json=payload)
         self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json['delivered'])
         self.post.assert_called_once()
         sent = self.post.call_args.kwargs
         self.assertIn(payload['situation'], sent['json']['content'])
@@ -99,8 +100,26 @@ class DiscordSessionLogTests(unittest.TestCase):
         self.post.side_effect = RuntimeError('private webhook token')
         with self.assertLogs(backend.logger, level='ERROR') as logs:
             response = self.http.post('/api/log-session', json=self.payload())
-        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.status_code, 502)
+        self.assertFalse(response.json['success'])
+        self.assertTrue(response.json['retryable'])
         self.assertNotIn('private webhook token', ''.join(logs.output))
+
+    def test_missing_webhook_is_not_reported_as_a_successful_delivery(self):
+        with patch.object(backend, 'DISCORD_WEBHOOK_URL', ''):
+            response = self.http.post('/api/log-session', json=self.payload())
+        self.assertEqual(response.status_code, 503)
+        self.assertFalse(response.json['success'])
+        self.assertFalse(response.json['retryable'])
+        self.post.assert_not_called()
+
+    def test_discord_permission_failure_is_not_retried(self):
+        error = backend.requests.HTTPError('private webhook URL')
+        error.response = type('Response', (), {'status_code': 403})()
+        self.post.side_effect = error
+        response = self.http.post('/api/log-session', json=self.payload())
+        self.assertEqual(response.status_code, 502)
+        self.assertFalse(response.json['retryable'])
 
 
 if __name__ == '__main__':
